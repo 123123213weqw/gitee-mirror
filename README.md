@@ -12,6 +12,11 @@ Scheduled CI that mirrors every owned, non-fork repository from GitHub
   pull-request refs, then `git push --mirror` to Gitee. Force-syncs, so
   branches deleted on GitHub are also deleted on Gitee.
 - The `gitee-mirror` repo itself is excluded.
+- This repo is intentionally **public** (public repos get free, unlimited
+  Actions minutes). Because public workflow logs are world-readable, the
+  workflow never prints private repo names — progress is reported by index.
+- Each run commits a `.last-run` timestamp, because GitHub auto-disables
+  scheduled workflows on public repos after 60 days without a commit.
 
 ## Secrets (Actions → Settings → Secrets → Actions)
 

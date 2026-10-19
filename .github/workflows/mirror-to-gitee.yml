@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
+      - uses: actions/checkout@v4
+
       - name: Configure SSH key for Gitee
         env:
           GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
@@ -31,7 +33,9 @@ jobs:
         run: |
           set -u
 
-          # List owned, non-fork repos (paginated). This repo itself is excluded.
+          # NOTE: this repo is public and workflow logs are world-readable, so
+          # private repo names must never appear in the log. Report by index only.
+
           : > repos.txt
           page=1
           while :; do
@@ -43,18 +47,20 @@ jobs:
             [ "$count" -lt 100 ] && break
             page=$((page + 1))
           done
-          echo "Mirroring $(wc -l < repos.txt) repos"
+          total=$(wc -l < repos.txt)
+          [ "$total" -gt 0 ] || { echo "repo listing failed"; exit 1; }
+          echo "Mirroring $total repos"
 
           failures=0
+          i=0
           while IFS= read -r name; do
             [ -z "$name" ] && continue
-            echo "::group::$name"
+            i=$((i + 1))
             rm -rf m.git
             if ! git clone --quiet --mirror \
-                 "https://x-access-token:${GH_PAT}@github.com/${GH_USER}/${name}.git" m.git; then
-              echo "::error::fetch failed: $name"
+                 "https://x-access-token:${GH_PAT}@github.com/${GH_USER}/${name}.git" m.git >/dev/null 2>&1; then
+              echo "[$i/$total] FAILED (fetch)"
               failures=$((failures + 1))
-              echo "::endgroup::"
               continue
             fi
             # Drop GitHub-only ref namespaces (pull request refs etc.) so the
@@ -62,14 +68,27 @@ jobs:
             git -C m.git for-each-ref --format='%(refname)' \
               | grep -vE '^refs/(heads|tags)/' \
               | while IFS= read -r ref; do git -C m.git update-ref -d "$ref"; done
-            if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git"; then
-              echo "OK $name"
+            if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
+              echo "[$i/$total] ok"
             else
-              echo "::error::push failed: $name (repo missing on Gitee? create it once, next run picks it up)"
+              echo "[$i/$total] FAILED (push - Gitee repo missing?)"
               failures=$((failures + 1))
             fi
-            echo "::endgroup::"
           done < repos.txt
 
-          echo "Done. Failures: $failures / $(wc -l < repos.txt)"
+          echo "Done: $((total - failures))/$total ok, $failures failed"
           [ "$failures" -eq 0 ]
+
+      - name: Keep-alive commit (prevents 60-day schedule auto-disable)
+        if: ${{ always() }}
+        env:
+          GH_PAT: ${{ secrets.GH_MIRROR_PAT }}
+        run: |
+          date -u +"%Y-%m-%dT%H:%M:%SZ" > .last-run
+          git config user.name "mirror-bot"
+          git config user.email "123123213weqw@users.noreply.github.com"
+          git add .last-run
+          if ! git diff --cached --quiet; then
+            git commit -q -m "chore: keep-alive [skip ci]"
+            git push -q "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+          fi
