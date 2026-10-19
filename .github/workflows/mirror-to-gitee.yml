@@ -15,6 +15,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_MIRROR_PAT }}
 
       - name: Configure SSH key for Gitee
         env:
@@ -40,7 +42,7 @@ jobs:
           page=1
           while :; do
             resp=$(curl -sfS -H "Authorization: token $GH_PAT" \
-              "https://api.github.com/user/repos?affiliation=owner&type=owner&per_page=100&page=${page}")
+              "https://api.github.com/user/repos?affiliation=owner&per_page=100&page=${page}")
             count=$(printf '%s' "$resp" | jq 'length')
             [ "${count:-0}" -eq 0 ] && break
             printf '%s' "$resp" | jq -r '.[] | select(.fork == false and .name != "gitee-mirror") | .name' >> repos.txt
@@ -81,8 +83,6 @@ jobs:
 
       - name: Keep-alive commit (prevents 60-day schedule auto-disable)
         if: ${{ always() }}
-        env:
-          GH_PAT: ${{ secrets.GH_MIRROR_PAT }}
         run: |
           date -u +"%Y-%m-%dT%H:%M:%SZ" > .last-run
           git config user.name "mirror-bot"
@@ -90,5 +90,5 @@ jobs:
           git add .last-run
           if ! git diff --cached --quiet; then
             git commit -q -m "chore: keep-alive [skip ci]"
-            git push -q "https://x-access-token:${GH_PAT}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main
+            git push -q origin HEAD:main
           fi
