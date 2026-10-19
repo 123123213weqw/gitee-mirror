@@ -1,0 +1,75 @@
+name: mirror-to-gitee
+
+on:
+  schedule:
+    - cron: "0 */12 * * *" # every 12 hours, UTC
+  workflow_dispatch:
+
+concurrency:
+  group: mirror-to-gitee
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Configure SSH key for Gitee
+        env:
+          GITEE_SSH_KEY: ${{ secrets.GITEE_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$GITEE_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -t ed25519,rsa gitee.com >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Mirror all owned non-fork repos to Gitee
+        env:
+          GH_PAT: ${{ secrets.GH_MIRROR_PAT }}
+          GH_USER: 123123213weqw
+          GITEE_USER: wangyue2006
+        run: |
+          set -u
+
+          # List owned, non-fork repos (paginated). This repo itself is excluded.
+          : > repos.txt
+          page=1
+          while :; do
+            resp=$(curl -sfS -H "Authorization: token $GH_PAT" \
+              "https://api.github.com/user/repos?affiliation=owner&type=owner&per_page=100&page=${page}")
+            count=$(printf '%s' "$resp" | jq 'length')
+            [ "${count:-0}" -eq 0 ] && break
+            printf '%s' "$resp" | jq -r '.[] | select(.fork == false and .name != "gitee-mirror") | .name' >> repos.txt
+            [ "$count" -lt 100 ] && break
+            page=$((page + 1))
+          done
+          echo "Mirroring $(wc -l < repos.txt) repos"
+
+          failures=0
+          while IFS= read -r name; do
+            [ -z "$name" ] && continue
+            echo "::group::$name"
+            rm -rf m.git
+            if ! git clone --quiet --mirror \
+                 "https://x-access-token:${GH_PAT}@github.com/${GH_USER}/${name}.git" m.git; then
+              echo "::error::fetch failed: $name"
+              failures=$((failures + 1))
+              echo "::endgroup::"
+              continue
+            fi
+            # Drop GitHub-only ref namespaces (pull request refs etc.) so the
+            # mirror push contains exactly heads and tags.
+            git -C m.git for-each-ref --format='%(refname)' \
+              | grep -vE '^refs/(heads|tags)/' \
+              | while IFS= read -r ref; do git -C m.git update-ref -d "$ref"; done
+            if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git"; then
+              echo "OK $name"
+            else
+              echo "::error::push failed: $name (repo missing on Gitee? create it once, next run picks it up)"
+              failures=$((failures + 1))
+            fi
+            echo "::endgroup::"
+          done < repos.txt
+
+          echo "Done. Failures: $failures / $(wc -l < repos.txt)"
+          [ "$failures" -eq 0 ]
