@@ -24,13 +24,27 @@ Scheduled CI that mirrors every owned, non-fork repository from GitHub
 | ---------------- | -------------------------------------------------- |
 | `GITEE_SSH_KEY`  | Private SSH key authorized for the Gitee account   |
 | `GH_MIRROR_PAT`  | GitHub token with `repo` scope (reads private repos) |
+| `GITEE_TOKEN`    | Gitee personal access token with `projects` scope. Optional: when set, the workflow creates missing Gitee repos itself |
 
 ## Adding new repos
 
 1. Create the repo on GitHub as usual.
-2. Create an empty repo with the same name on Gitee (web UI or API).
-3. The next scheduled run picks it up automatically. Until step 2 is done,
-   the run logs a `push failed` line for it (harmless).
+2. The next scheduled run creates the empty Gitee repo and pushes to it, as
+   long as `GITEE_TOKEN` is set. Without that secret, create the empty repo on
+   Gitee by hand first — until then the run logs a `push failed` line for it
+   (harmless).
+
+Gitee has no "create on push", so `GITEE_TOKEN` is what turns a brand-new
+GitHub repo into a mirrored one without manual work. Two Gitee quirks are
+handled explicitly, both verified against the live API:
+
+- `POST /user/repos` accepts and ignores `private`, so every API-created repo
+  starts private. The workflow therefore issues a follow-up
+  `PATCH /repos/{owner}/{repo}` to match the GitHub visibility.
+- That `PATCH` is rejected on an empty repo (`空仓库不支持设置为公开仓库`), so it
+  runs only after the first successful push — and only for repos the run
+  created itself, never for repos that were already there. Flipping an
+  existing Gitee repo between public and private stays a manual decision.
 
 ## Changing the schedule
 

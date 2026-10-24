@@ -32,11 +32,60 @@ jobs:
           GH_PAT: ${{ secrets.GH_MIRROR_PAT }}
           GH_USER: 123123213weqw
           GITEE_USER: wangyue2006
+          GITEE_TOKEN: ${{ secrets.GITEE_TOKEN }}
         run: |
           set -u
 
           # NOTE: this repo is public and workflow logs are world-readable, so
           # private repo names must never appear in the log. Report by index only.
+
+          # Creation always lands in the token owner's namespace while the push
+          # targets GITEE_USER, so a token from another account would quietly
+          # create repos in the wrong place. Fail fast instead.
+          if [ -n "${GITEE_TOKEN:-}" ]; then
+            token_owner=$(curl -sS -H "Authorization: token ${GITEE_TOKEN}" \
+              https://gitee.com/api/v5/user | jq -r '.login // empty')
+            if [ "$token_owner" != "$GITEE_USER" ]; then
+              echo "GITEE_TOKEN belongs to '${token_owner:-unknown}', not to ${GITEE_USER}"
+              exit 1
+            fi
+          fi
+
+          # Create the Gitee repo if it is not there yet. Gitee has no
+          # "create on push", so without this a brand-new GitHub repo fails
+          # until an empty repo of the same name is made by hand.
+          # Prints nothing: the caller renders progress by index. Sets HTTP and
+          # CREATED for the caller. Returns 0 when the repo is ready to receive
+          # a push (created now, or already existing), 1 when creation failed.
+          create_gitee_repo() {
+            CREATED=0
+            HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+              "https://gitee.com/api/v5/user/repos" \
+              -H "Authorization: token ${GITEE_TOKEN}" \
+              --data-urlencode "name=$1" \
+              -d "auto_init=false") || HTTP=000
+            case "$HTTP" in
+              201) CREATED=1; return 0 ;;
+              422) return 0 ;; # already exists (Gitee matches names case-insensitively)
+              *) return 1 ;;
+            esac
+          }
+
+          # Match the Gitee visibility to the GitHub one. Runs only for repos
+          # this run created, and only after the first push, because Gitee
+          # rejects the update on an empty repo ("空仓库不支持设置为公开仓库")
+          # and POST /user/repos ignores the flag altogether (verified: `private`
+          # is accepted and ignored, `public` is rejected as invalid). Gitee's
+          # update endpoint also demands `name` even when it does not change.
+          set_gitee_visibility() {
+            VISIBILITY=ok
+            HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH \
+              "https://gitee.com/api/v5/repos/${GITEE_USER}/$1" \
+              -H "Authorization: token ${GITEE_TOKEN}" \
+              --data-urlencode "name=$1" \
+              --data-urlencode "private=$2") || HTTP=000
+            [ "$HTTP" = 200 ] || VISIBILITY="HTTP $HTTP"
+          }
 
           : > repos.txt
           page=1
@@ -45,19 +94,37 @@ jobs:
               "https://api.github.com/user/repos?affiliation=owner&per_page=100&page=${page}")
             count=$(printf '%s' "$resp" | jq 'length')
             [ "${count:-0}" -eq 0 ] && break
-            printf '%s' "$resp" | jq -r '.[] | select(.fork == false and .name != "gitee-mirror") | .name' >> repos.txt
+            printf '%s' "$resp" | jq -r '.[] | select(.fork == false and .name != "gitee-mirror") | "\(.name) \(.private)"' >> repos.txt
             [ "$count" -lt 100 ] && break
             page=$((page + 1))
           done
-          total=$(wc -l < repos.txt)
+          total=$(wc -l < repos.txt | tr -d '[:space:]')
           [ "$total" -gt 0 ] || { echo "repo listing failed"; exit 1; }
           echo "Mirroring $total repos"
 
           failures=0
+          created=0
           i=0
-          while IFS= read -r name; do
-            [ -z "$name" ] && continue
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            name=${line%% *}
+            is_private=${line##* }
             i=$((i + 1))
+            CREATED=0
+            # Skipped when the secret is absent, which keeps the old behaviour
+            # (target repo must already exist on Gitee).
+            if [ -n "${GITEE_TOKEN:-}" ]; then
+              if create_gitee_repo "$name"; then
+                if [ "$CREATED" = 1 ]; then
+                  created=$((created + 1))
+                  echo "[$i/$total] created Gitee repo"
+                fi
+              else
+                echo "[$i/$total] FAILED (create - HTTP $HTTP)"
+                failures=$((failures + 1))
+                continue
+              fi
+            fi
             rm -rf m.git
             if ! git clone --quiet --mirror \
                  "https://x-access-token:${GH_PAT}@github.com/${GH_USER}/${name}.git" m.git >/dev/null 2>&1; then
@@ -72,13 +139,18 @@ jobs:
               | while IFS= read -r ref; do git -C m.git update-ref -d "$ref"; done
             if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
               echo "[$i/$total] ok"
+              if [ "$CREATED" = 1 ]; then
+                set_gitee_visibility "$name" "$is_private"
+                [ "$VISIBILITY" = ok ] || \
+                  echo "[$i/$total] note: Gitee visibility not applied ($VISIBILITY)"
+              fi
             else
               echo "[$i/$total] FAILED (push - Gitee repo missing?)"
               failures=$((failures + 1))
             fi
           done < repos.txt
 
-          echo "Done: $((total - failures))/$total ok, $failures failed"
+          echo "Done: $((total - failures))/$total ok, $failures failed, $created created"
           [ "$failures" -eq 0 ]
 
       - name: Keep-alive commit (prevents 60-day schedule auto-disable)
