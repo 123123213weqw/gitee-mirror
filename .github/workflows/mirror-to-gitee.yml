@@ -12,7 +12,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -36,6 +36,13 @@ jobs:
         run: |
           set -u
 
+          # A silently-dropped SSH or HTTPS connection hangs forever without
+          # these: one 43 KB push stalled for 89 minutes until the job
+          # timeout killed it. Keepalives make a dead link fail in ~1 min
+          # instead, and every push gets one retry.
+          export GIT_SSH_COMMAND="ssh -o ConnectTimeout=15 -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
+          CURL="curl --connect-timeout 10 --max-time 120"
+
           # NOTE: this repo is public and workflow logs are world-readable, so
           # private repo names must never appear in the log. Report by index only.
 
@@ -43,7 +50,7 @@ jobs:
           # targets GITEE_USER, so a token from another account would quietly
           # create repos in the wrong place. Fail fast instead.
           if [ -n "${GITEE_TOKEN:-}" ]; then
-            token_owner=$(curl -sS -H "Authorization: token ${GITEE_TOKEN}" \
+            token_owner=$($CURL -sS -H "Authorization: token ${GITEE_TOKEN}" \
               https://gitee.com/api/v5/user | jq -r '.login // empty')
             if [ "$token_owner" != "$GITEE_USER" ]; then
               echo "GITEE_TOKEN belongs to '${token_owner:-unknown}', not to ${GITEE_USER}"
@@ -59,7 +66,7 @@ jobs:
           # a push (created now, or already existing), 1 when creation failed.
           create_gitee_repo() {
             CREATED=0
-            HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+            HTTP=$($CURL -sS -o /dev/null -w '%{http_code}' -X POST \
               "https://gitee.com/api/v5/user/repos" \
               -H "Authorization: token ${GITEE_TOKEN}" \
               --data-urlencode "name=$1" \
@@ -79,7 +86,7 @@ jobs:
           # update endpoint also demands `name` even when it does not change.
           set_gitee_visibility() {
             VISIBILITY=ok
-            HTTP=$(curl -sS -o /dev/null -w '%{http_code}' -X PATCH \
+            HTTP=$($CURL -sS -o /dev/null -w '%{http_code}' -X PATCH \
               "https://gitee.com/api/v5/repos/${GITEE_USER}/$1" \
               -H "Authorization: token ${GITEE_TOKEN}" \
               --data-urlencode "name=$1" \
@@ -90,7 +97,7 @@ jobs:
           : > repos.txt
           page=1
           while :; do
-            resp=$(curl -sfS -H "Authorization: token $GH_PAT" \
+            resp=$($CURL -sfS -H "Authorization: token $GH_PAT" \
               "https://api.github.com/user/repos?affiliation=owner&per_page=100&page=${page}")
             count=$(printf '%s' "$resp" | jq 'length')
             [ "${count:-0}" -eq 0 ] && break
@@ -137,7 +144,16 @@ jobs:
             git -C m.git for-each-ref --format='%(refname)' \
               | grep -vE '^refs/(heads|tags)/' \
               | while IFS= read -r ref; do git -C m.git update-ref -d "$ref"; done
-            if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
+            push_ok=0
+            for attempt in 1 2; do
+              if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
+                push_ok=1
+                break
+              fi
+              [ "$attempt" -eq 1 ] && echo "[$i/$total] push failed, retrying once"
+              sleep 5
+            done
+            if [ "$push_ok" = 1 ]; then
               echo "[$i/$total] ok"
               if [ "$CREATED" = 1 ]; then
                 set_gitee_visibility "$name" "$is_private"
