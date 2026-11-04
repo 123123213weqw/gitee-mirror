@@ -2,7 +2,9 @@ name: mirror-to-gitee
 
 on:
   schedule:
-    - cron: "0 */12 * * *" # every 12 hours, UTC
+    # Off the hour (top-of-hour cron slots are heavily queued and ran 4-9 h
+    # late) and every 6 h to halve the worst-case mirror lag.
+    - cron: "37 */6 * * *"
   workflow_dispatch:
 
 concurrency:
