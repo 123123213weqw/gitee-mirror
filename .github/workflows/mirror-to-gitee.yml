@@ -14,7 +14,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
         with:
@@ -146,9 +146,14 @@ jobs:
             git -C m.git for-each-ref --format='%(refname)' \
               | grep -vE '^refs/(heads|tags)/' \
               | while IFS= read -r ref; do git -C m.git update-ref -d "$ref"; done
+            # Hard per-attempt cap: keepalives only catch dead connections, not
+            # a transfer that crawls forever (one first-time push of a large
+            # repo ran 57 minutes before dying). Cap each attempt so an
+            # oversized repo is skipped instead of eating the whole run.
             push_ok=0
             for attempt in 1 2; do
-              if git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
+              if timeout --kill-after=15 900 \
+                 git -C m.git push --quiet --mirror "git@gitee.com:${GITEE_USER}/${name}.git" >/dev/null 2>&1; then
                 push_ok=1
                 break
               fi
