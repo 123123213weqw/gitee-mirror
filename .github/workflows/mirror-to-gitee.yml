@@ -111,9 +111,10 @@ jobs:
           [ "$total" -gt 0 ] || { echo "repo listing failed"; exit 1; }
           echo "Mirroring $total repos"
 
-          failures=0
-          created=0
-          i=0
+            failures=0
+            created=0
+            skipped=0
+            i=0
           while IFS= read -r line; do
             [ -z "$line" ] && continue
             name=${line%% *}
@@ -139,6 +140,13 @@ jobs:
                  "https://x-access-token:${GH_PAT}@github.com/${GH_USER}/${name}.git" m.git >/dev/null 2>&1; then
               echo "[$i/$total] FAILED (fetch)"
               failures=$((failures + 1))
+              continue
+            fi
+            # An empty GitHub repo has no refs to mirror and Gitee rejects a
+            # zero-ref push, so skip it instead of counting a failure.
+            if [ -z "$(git -C m.git for-each-ref --format='%(refname)' | head -1)" ]; then
+              echo "[$i/$total] empty, skipped"
+              skipped=$((skipped + 1))
               continue
             fi
             # Drop GitHub-only ref namespaces (pull request refs etc.) so the
@@ -173,7 +181,7 @@ jobs:
             fi
           done < repos.txt
 
-          echo "Done: $((total - failures))/$total ok, $failures failed, $created created"
+          echo "Done: $((total - failures - skipped))/$total ok, $failures failed, $created created, $skipped skipped"
           [ "$failures" -eq 0 ]
 
       - name: Keep-alive commit (prevents 60-day schedule auto-disable)
